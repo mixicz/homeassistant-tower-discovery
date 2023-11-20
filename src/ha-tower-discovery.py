@@ -11,9 +11,10 @@ class Configuration:
     def __init__(self):
         self.mqtt_broker = "mqtt.example.com"
         self.mqtt_port = 1883
-        self.mqtt_topic_discovery = "gateway/{id}/nodes/get"
-        self.mqtt_topic_nodes = "gateway/{id}/nodes"
+        self.mqtt_topic_discovery = "gateway/{}/nodes/get"
+        self.mqtt_topic_nodes = "gateway/{}/nodes"
         self.mqtt_topic_advertisement = "homeassistant/devices"
+        self.gateway_id = "usb-dongle"
         self.advertise_interval = None
         self.firmware_dir = "firmware"
 
@@ -45,15 +46,22 @@ client = mqtt.Client()
 
 def on_connect(client, userdata, flags, rc):
     print("Connected to MQTT broker")
-    client.subscribe(config.mqtt_topic_nodes)
+    client.subscribe(config.mqtt_topic_nodes.format(config.gateway_id))
 
 def on_message(client, userdata, msg):
-    if msg.topic == config.mqtt_topic_nodes:
+    if msg.topic == config.mqtt_topic_nodes.format(config.gateway_id):
+        # format of device list:
+        # [{"id": "72335554ea02", "alias": "led-pwm:terasa:0"}, {"id": "d704ee327346", "alias": "motion-detector:terasa:0"}, {"id": "373ca27b396d", "alias": "button:vchod:0"}, {"id": "13d444d82727", "alias": "doorbell:bell:0"}, {"id": "eaf0e05f9dfa", "alias": "climate-monitor:0"}, {"id": "7de0a3693435", "alias": "motion-detector:schodiste:0"}, {"id": "e450ffcccdba", "alias": "motion-detector:schodiste:1"}, {"id": "094d268ec673", "alias": "led-pwm:schodiste:0"}, {"id": "99309c1c2843", "alias": "motion-detector:puda:0"}, {"id": "80331b60364d", "alias": "led-pwm:puda:0"}]
         devices = json.loads(msg.payload)
+        
+        for device in devices:
+            alias_parts = device["alias"].split(":")
+            device["firmware"] = alias_parts[0]
+        
         advertise_devices(devices)
 
 def send_discovery_message():
-    client.publish(config.mqtt_topic_discovery, "")
+    client.publish(config.mqtt_topic_discovery.format(config.gateway_id), "")
 
 def advertise_devices(devices):
     for device in devices:
@@ -66,6 +74,14 @@ def main():
     client.on_message = on_message
 
     client.connect(config.mqtt_broker, config.mqtt_port, 60)
+    
+    # Flask app setup
+    app = Flask(__name__)
+
+    @app.route('/health')
+    def health_check():
+        return 'OK'
+
 
     if config.advertise_interval:
         client.loop_start()
@@ -74,13 +90,6 @@ def main():
             time.sleep(config.advertise_interval)
     else:
         client.loop_forever()
-
-# Flask app setup
-app = Flask(__name__)
-
-@app.route('/health')
-def health_check():
-    return 'OK'
 
 if __name__ == "__main__":
     main()
