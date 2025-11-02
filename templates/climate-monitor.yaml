@@ -1,0 +1,65 @@
+{
+  "device": {
+    "identifiers": ["{{ device.safe_alias }}"],
+    "name": "HARDWARIO Climate Module {{ device.alias }}",
+    "manufacturer": "HARDWARIO",
+    "model": "Climate Module",
+    "sw_version": "{{ device.version }}",
+    "configuration_url": "https://docs.hardwario.com/"
+  },
+  "origin": {
+    "name": "HARDWARIO Tower",
+    "sw_version": "{{ device.version }}",
+    "support_url": "https://docs.hardwario.com/"
+  },
+  "components": {
+    "temperature": {
+      "platform": "sensor",
+      "device_class": "temperature",
+      "unit_of_measurement": "°C",
+      "state_topic": "node/{{ device.alias }}/thermometer/0:0/temperature",
+      "unique_id": "{{ device.safe_alias }}_temperature",
+      "name": "Temperature"
+    },
+    "humidity": {
+      "platform": "sensor",
+      "device_class": "humidity",
+      "unit_of_measurement": "%",
+      "state_topic": "node/{{ device.alias }}/hygrometer/0:2/relative-humidity",
+      "unique_id": "{{ device.safe_alias }}_humidity",
+      "name": "Humidity"
+    },
+    "pressure": {
+      "platform": "sensor",
+      "device_class": "atmospheric_pressure",
+      "unit_of_measurement": "hPa",
+      "state_topic": "node/{{ device.alias }}/barometer/0:0/pressure",
+      "unique_id": "{{ device.safe_alias }}_pressure",
+      "name": "Pressure"
+    },
+    "altitude": {
+      "platform": "sensor",
+      "device_class": "distance",
+      "unit_of_measurement": "m",
+      "state_topic": "node/{{ device.alias }}/barometer/0:0/altitude",
+      "unique_id": "{{ device.safe_alias }}_altitude",
+      "name": "Altitude"
+    },
+    "illuminance": {
+      "platform": "sensor",
+      "device_class": "illuminance",
+      "unit_of_measurement": "lx",
+      "state_topic": "node/{{ device.alias }}/lux-meter/0:0/illuminance",
+      "unique_id": "{{ device.safe_alias }}_illuminance",
+      "name": "Illuminance"
+    },
+    "battery_voltage": {
+      "platform": "sensor",
+      "device_class": "voltage",
+      "unit_of_measurement": "V",
+      "state_topic": "node/{{ device.alias }}/battery/mini/voltage",
+      "unique_id": "{{ device.safe_alias }}_battery_voltage",
+      "name": "Battery Voltage"
+    }
+  }
+}

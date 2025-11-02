@@ -79,26 +79,99 @@ template_env = Environment(loader=template_loader)
 # MQTT client setup
 client = mqtt.Client()
 
+def sanitize_object_id(s):
+    # Replace unsupported characters with underscore; keep alnum, '-' and '_'
+    import re
+    return re.sub(r'[^A-Za-z0-9_-]', '_', s)
+
 def on_connect(client, userdata, flags, rc):
     print("Connected to MQTT broker")
     client.subscribe(config.mqtt_topic_nodes.format(config.gateway_id))
 
+    # Subscribe to device-originated HomeAssistant discovery topics:
+    # node/{id}/homeassistant/{component}/{sub_id}/#
+    client.subscribe("node/+/homeassistant/+/+/#")
+
+
 def on_message(client, userdata, msg):
-    if msg.topic == config.mqtt_topic_nodes.format(config.gateway_id):
+    topic = msg.topic
+    payload = msg.payload
+
+    # Node list (discovery of devices) - existing behavior
+    if topic == config.mqtt_topic_nodes.format(config.gateway_id):
         if config.debug:
-            print("Received message: {}", msg.payload)
+            print("Received device list: {} -> {}".format(config.gateway_id, payload))
         # format of device list:
         # [{"id": "72335554ea02", "alias": "led-pwm:terasa:0"}, {"id": "d704ee327346", "alias": "motion-detector:terasa:0"}, {"id": "373ca27b396d", "alias": "button:vchod:0"}, {"id": "13d444d82727", "alias": "doorbell:bell:0"}, {"id": "eaf0e05f9dfa", "alias": "climate-monitor:0"}, {"id": "7de0a3693435", "alias": "motion-detector:schodiste:0"}, {"id": "e450ffcccdba", "alias": "motion-detector:schodiste:1"}, {"id": "094d268ec673", "alias": "led-pwm:schodiste:0"}, {"id": "99309c1c2843", "alias": "motion-detector:puda:0"}, {"id": "80331b60364d", "alias": "led-pwm:puda:0"}]
-        devices = json.loads(msg.payload)
-        
+        try:
+            devices = json.loads(payload)
+        except Exception as e:
+            print("Error parsing device list:", e)
+            return
+
         for device in devices:
             alias_parts = device["alias"].split(":")
             device["firmware"] = alias_parts[0]
+            device["safe_alias"] = sanitize_object_id(device["alias"])
+            device["version"] = device.get("version", "v0")  # Default version if not provided
 
         if config.debug:
-            print("  \--> device list: {}", devices)
-        
+            print("  \--> device list: {}".format(devices))
+
         advertise_devices(devices)
+        return
+
+    # Forward device-originated HomeAssistant discovery messages only
+    parts = topic.split('/')
+    # Expecting: node/{id}/homeassistant/{component}/{sub_id}/... (config payload usually at the end)
+    if len(parts) >= 5 and parts[0] == 'node' and parts[2] == 'homeassistant':
+        node_id = parts[1]
+        component = parts[3]
+        sub_id = parts[4]
+
+        # Build object_id as '{ID}-{sub_id}' and sanitize
+        object_id = sanitize_object_id(f"{node_id}-{sub_id}")
+
+        # Target discovery config topic for HomeAssistant
+        target_topic = f"homeassistant/{component}/{object_id}/config"
+
+        # Only forward the discovery/config payload. Do not forward subsequent command/state topics.
+        # We assume the device publishes discovery under this node/... topic namespace.
+        try:
+            # Attempt to parse payload as JSON and prepend node prefix to topic fields inside
+            node_prefix = f"{parts[0]}/{parts[1]}/"
+            forwarded_payload = payload
+            try:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    # For each string field that looks like an MQTT topic, prepend node prefix
+                    for k, v in list(parsed.items()):
+                        if isinstance(v, str) and '/' in v:
+                            # Do not modify absolute homeassistant discovery target paths
+                            if v.startswith('homeassistant/'):
+                                continue
+                            # Avoid double-prefixing
+                            if v.startswith(node_prefix):
+                                continue
+                            # Strip leading slashes
+                            vv = v.lstrip('/')
+                            parsed[k] = node_prefix + vv
+                    forwarded_payload = json.dumps(parsed)
+            except Exception:
+                # if not JSON, forward raw payload
+                forwarded_payload = payload
+
+            # Publish the (possibly modified) payload as retained so HA can discover the entity
+            client.publish(target_topic, forwarded_payload, qos=0, retain=True)
+            if config.debug:
+                print(f"Forwarded discovery: {topic} -> {target_topic}")
+        except Exception as e:
+            print("Error forwarding discovery payload:", e)
+        return
+
+    # Otherwise ignore other messages to avoid forwarding commands/events for led-pwm
+    if config.debug:
+        print(f"Ignored topic: {topic}")
 
 def send_discovery_message():
     client.publish(config.mqtt_topic_discovery.format(config.gateway_id), "")
@@ -110,7 +183,8 @@ def advertise_devices(devices):
             json_message = template.render(device=device)
             client.publish(config.mqtt_topic_advertisement, json_message)
         except jinja2.exceptions.TemplateNotFound:
-            print(f"Template file {device['firmware']}.yaml not found")
+            if config.debug:
+                print(f"Template file {device['firmware']}.yaml not found")
 
 def main():
     client.on_connect = on_connect
