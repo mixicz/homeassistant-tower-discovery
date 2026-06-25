@@ -53,14 +53,9 @@ deferred (see Non-goals).
 
 ## Non-goals (deferred / out of scope)
 
-- **Actuators** (lights W/RGB/RGBW, controllable fans, pump/fill). They are not
-  observable (command topics the device subscribes to), their semantics live only
-  in firmware config, and the current "smart endpoints, dumb pipes" control model
-  is not HA-compatible. They require an HA-compatible actuator firmware effort
-  first, after which they will be discovered via a **firmware-publish layer**
-  (the node publishes a small purpose-built "my actuators" message the service
-  consumes). This design leaves that as a clean future extension point; it is not
-  built now.
+- **Actuators** (lights, controllable fans, pump/fill). Not observable (they are
+  command topics the device subscribes to) and not HA-compatible in the current
+  firmware. Out of scope; sensors only.
 - Gateway node-list querying (`gateway/{id}/nodes`) — not needed; observation
   learns every node from its topics. May be re-added later only to enrich device
   metadata (e.g. `sw_version`), which observation cannot see.
@@ -224,22 +219,47 @@ regexes:
   gone. `expire_after` already makes its entities show `unavailable`. (YAGNI;
   add opt-in pruning only if needed.)
 
-### Persistence
+### Startup adoption (state recovery)
 
-Seen-state (set of published entity object_ids + their last-published content
-hash) in a small JSON file (stdlib `json`), reloaded on start. Discovery configs
-are retained on the broker regardless, so HA keeps entities across restarts; the
-state file is to avoid redundant republishing and to drive reconcile/forget.
+The service holds **no persistent state of its own.** The durable record of what
+has been discovered is the set of **retained discovery configs on the broker** —
+the same messages HA reads. On startup the service rebuilds its in-memory
+seen-state from them, so nothing extra needs to be persisted across restarts.
+
+Three ordered phases on a single connection; publishing is gated behind adoption
+so there is no window where old state is being read while new state is written:
+
+1. **Adopt.** Connect, subscribe `homeassistant/+/+/config`. The broker replays
+   all matching retained configs as a burst. Keep those whose
+   `origin.name == tower-ha-discovery`; record each `object_id` + a hash of its
+   payload into in-memory seen-state. MQTT has no end-of-burst marker, so
+   completion is inferred by **quiescence**: adoption ends after
+   `adopt_quiescence` seconds (default 1 s) with no further retained message,
+   capped by `adopt_timeout` seconds (default 10 s).
+2. **Reconcile.** For each adopted config whose alias no longer matches the
+   allowlist, clear its retained payload (empty message).
+3. **Go live.** Unsubscribe the discovery prefix, subscribe `node/+/#`, and begin
+   normal observe → debounce → publish.
+
+Seen-state is the set of published entity `object_id`s + last-published content
+hash: it lets the service skip redundant republishes (compare hash) and drive
+reconcile/forget. It is purely in-memory, recovered by adoption.
+
+Self-healing fallback: nodes that published only while the service was down, or a
+broker that lost its retained store, are simply rediscovered by live observation
+as they next publish — adoption is a fast-path optimisation, never a correctness
+dependency.
 
 ### Configuration surface
 
 Broker host/port/credentials, `node/` and discovery (`homeassistant/`) prefixes,
 allowlist patterns, sensor-map overrides (device_class/unit/`expire_after` per
 type), global default `expire_after`, **first-discovery debounce seconds (default
-120)**, `location → label` map, name override map, state-file path, **HTTP API
-bind address/port**, debug. Config via env + CLI (existing `Configuration`
-pattern); larger maps (sensor-map, locations, overrides) via a mounted config
-file (ConfigMap).
+120)**, **startup `adopt_quiescence` (default 1 s) and `adopt_timeout` (default
+10 s)**, `location → label` map, name override map, **HTTP API bind
+address/port**, debug. Config via env + CLI (existing `Configuration` pattern);
+larger maps (sensor-map, locations, overrides) via a mounted config file
+(ConfigMap).
 
 ## Service API & health
 
@@ -264,17 +284,16 @@ while disconnected.
 
 ## Deployment (Kubernetes)
 
-Runs as a `Deployment` (single replica — it holds debounce buffers and a state
-file; multiple replicas would double-publish) in the **`home-assistant`**
-namespace.
+Runs as a **stateless** `Deployment` in the **`home-assistant`** namespace. No
+volume is needed — seen-state is recovered by startup adoption. Single replica
+with `strategy: Recreate` so only one instance is ever active (two would
+double-publish; Recreate terminates the old pod before starting the new one).
 
 Manifests (`deploy/` or `k8s/`):
-- **Deployment** — the container, env from ConfigMap + Secret, probes, a
-  `PersistentVolumeClaim` (or hostPath, per cluster norms) mounted for the
-  state file so seen-state survives restarts, `strategy: Recreate` (single
-  writer).
+- **Deployment** — the container, env from ConfigMap + Secret, probes,
+  `strategy: Recreate`. No PVC.
 - **ConfigMap** — non-secret config (prefixes, allowlist, sensor-map, locations,
-  debounce, expire defaults).
+  debounce, expire defaults, adopt timeouts).
 - **Secret** — broker credentials, API bearer token.
 - **Service** (ClusterIP) — exposes the HTTP API port.
 - **Ingress** — publishes the API; mutating endpoints protected by the bearer
@@ -292,7 +311,18 @@ current stable at implementation time, not assumed here.
 
 - **Local `README.md`** — dev cycle: venv setup, run locally against a broker,
   run the self-check, build the image, deploy to the cluster, and use the API
-  (forget/list).
+  (forget/list). Include a **Deferred features** section capturing ideas parked
+  out of the current scope so they aren't lost:
+  - *Actuators* (lights/fans/pump): await HA-compatible actuator firmware, then
+    discover via a firmware-published actuator-layout message consumed by a thin
+    per-firmware adapter, reusing the device-grouping/naming/allowlist machinery.
+  - *Explicit state store* (e.g. NATS JetStream KV) if non-derivable state is
+    ever needed (audit/forget history) — not required while seen-state is
+    rebuilt from retained configs.
+  - *Telemetry-stream replay* as an alternative cold-start to retained-config
+    adoption, with a liveness time-window — only if retained adoption proves
+    insufficient.
+  - *`sw_version`* on device cards via an optional gateway node-list lookup.
 - **mixi-docs page** — operational doc in the documentation repo. Call
   `get_conventions()` first and follow it (lint + strict-build gate). Cover what
   the service does, the allowlist rename-to-opt-in workflow, the forget API, and
@@ -326,8 +356,6 @@ current stable at implementation time, not assumed here.
 - `expire_after` → entity becomes `unavailable` after N seconds without an update.
 - Deprecated `object_id` payload field (removed 2026.4) → `default_entity_id`; we
   avoid the field entirely.
-- `color_mode`/`brightness` discovery keys removed (2025.3) — relevant to the
-  future actuator layer only.
 
 ## Verify-on-wire (must confirm against the real broker)
 
@@ -349,11 +377,3 @@ through the pure `topics → discovery messages` function and assert:
 - all entities of one alias share `device.identifiers` (one device);
 - non-allowlisted aliases produce nothing;
 - generated names match the convention.
-
-## Future extension: actuators
-
-When HA-compatible actuator firmware exists, custom nodes publish a small
-purpose-built actuator-layout message; the service grows a thin per-firmware
-adapter that maps it to HA `light`/`fan`/etc. discovery, reusing the same
-device-grouping, naming, allowlist, and retained-lifecycle machinery defined
-here. No change to the sensor path.
