@@ -44,6 +44,10 @@ deferred (see Non-goals).
 - Per-sensor-type **`expire_after`** so lost-connectivity sensors show
   `unavailable` rather than a stale value.
 - **Allowlist** control over which nodes are published (dev/test nodes excluded).
+- **First-discovery debounce** so a node appears in HA complete on first publish.
+- **Operator API** (list / forget) on Ingress + **health probes** for Kubernetes.
+- Deploy as a **Kubernetes Deployment** in the `home-assistant` namespace.
+- Documented in **mixi-docs** plus a local README covering the dev cycle.
 - Survive service and HA restarts.
 - Zero firmware changes.
 
@@ -74,13 +78,32 @@ Single long-running Python process, co-located with the broker.
 3. Apply the **allowlist** to `{alias}`. If it does not match, ignore.
 4. Look up `{resource}` + `{quantity}` in the **sensor map**. If absent, ignore
    (debug-log once).
-5. Build a per-entity discovery config and, if this entity has not already been
-   published with identical content, publish it **retained** to
-   `homeassistant/sensor/{object_id}/config`.
+5. Build the per-entity discovery config and route it through the
+   **first-discovery debounce** (below): buffer it if the node is new, else
+   publish immediately if changed.
 6. Record the published entity in the persisted seen-state.
 
 The unit `topic(s) → discovery message(s)` is a **pure function** and is the
-primary test surface (no broker required).
+primary test surface (no broker required). MQTT runs on `loop_start()` (paho
+background thread); a periodic tick flushes debounce buffers; the HTTP API runs
+in the main thread.
+
+### First-discovery debounce
+
+When the first entity for an **unseen node** (alias not in seen-state) is
+observed, the service does **not** publish immediately. It opens a buffer for
+that node and starts a timer (configurable, default **120 s**). On device boot
+every sensor emits a fresh measurement, so the window gives the node a fair
+chance to reveal its full sensor set. When the timer expires, all buffered
+entities for the node are published together (retained), so the device appears in
+HA complete on first try rather than growing entity-by-entity.
+
+After a node is established (its buffer has flushed once), any *newly* observed
+entity for it publishes immediately — no second debounce. Changed content for an
+already-published entity is an immediate idempotent upsert.
+
+`ponytail:` one timer per pending node, flushed by the periodic tick; no
+scheduler library.
 
 ### Topic parsing
 
@@ -135,9 +158,9 @@ payload field (removed HA 2026.4); if pinning an entity_id is ever wanted, use
 ### Sensor map (the only domain knowledge)
 
 A small static table mapping observed `resource`/`quantity` to HA metadata and a
-default `expire_after`. Seeded from the resource→entity table in
-`doc/tower-advertise.md` and the observed firmware topics. Unknown resources are
-ignored.
+default `expire_after`. Seeded from the resource→entity table in the archived
+`docs/archive/tower-advertise.md` and the observed firmware topics. Unknown
+resources are ignored.
 
 | resource / quantity                 | device_class                     | unit | expire_after (s) |
 |-------------------------------------|----------------------------------|------|------------------|
@@ -194,8 +217,9 @@ regexes:
 - **Reconcile:** when the allowlist changes such that a previously-discovered node
   no longer matches, the service clears that node's retained configs (empty
   payloads) on next run.
-- **Forget (manual):** an operator-triggered path to clear a specific node's/
-  entity's retained configs.
+- **Forget (manual):** an operator-triggered path (the **Service API**, below)
+  to clear a specific node's/entity's retained configs and drop it from
+  seen-state.
 - **Stale pruning:** OFF by default — a silent battery/radio node is asleep, not
   gone. `expire_after` already makes its entities show `unavailable`. (YAGNI;
   add opt-in pruning only if needed.)
@@ -211,20 +235,84 @@ state file is to avoid redundant republishing and to drive reconcile/forget.
 
 Broker host/port/credentials, `node/` and discovery (`homeassistant/`) prefixes,
 allowlist patterns, sensor-map overrides (device_class/unit/`expire_after` per
-type), global default `expire_after`, `location → label` map, name override map,
-state-file path, debug.
+type), global default `expire_after`, **first-discovery debounce seconds (default
+120)**, `location → label` map, name override map, state-file path, **HTTP API
+bind address/port**, debug. Config via env + CLI (existing `Configuration`
+pattern); larger maps (sensor-map, locations, overrides) via a mounted config
+file (ConfigMap).
 
-## Reuse / delete from existing repo
+## Service API & health
+
+A small HTTP server (stdlib `http.server`, no framework) for operations and
+Kubernetes probes. Read-only endpoints are unauthenticated; mutating endpoints
+require a bearer token (from a Secret) since they're exposed on Ingress.
+
+| Method & path            | Purpose |
+|--------------------------|---------|
+| `GET /health`            | Liveness: process up. Always 200 if serving. |
+| `GET /ready`             | Readiness: 200 only when MQTT is connected. |
+| `GET /devices`           | List discovered nodes and their entities (from seen-state). |
+| `DELETE /devices/{alias}`| Forget a node: clear its retained discovery configs, drop from seen-state. |
+| `DELETE /devices/{alias}/entities/{object_id}` | Forget a single entity. |
+
+`ponytail:` stdlib `http.server` with a tiny path dispatch covers six endpoints;
+upgrade to a micro-framework only if the API grows materially.
+
+Probes: `livenessProbe` → `GET /health`; `readinessProbe` → `GET /ready`. A
+readiness flip on MQTT disconnect keeps the pod from being treated as healthy
+while disconnected.
+
+## Deployment (Kubernetes)
+
+Runs as a `Deployment` (single replica — it holds debounce buffers and a state
+file; multiple replicas would double-publish) in the **`home-assistant`**
+namespace.
+
+Manifests (`deploy/` or `k8s/`):
+- **Deployment** — the container, env from ConfigMap + Secret, probes, a
+  `PersistentVolumeClaim` (or hostPath, per cluster norms) mounted for the
+  state file so seen-state survives restarts, `strategy: Recreate` (single
+  writer).
+- **ConfigMap** — non-secret config (prefixes, allowlist, sensor-map, locations,
+  debounce, expire defaults).
+- **Secret** — broker credentials, API bearer token.
+- **Service** (ClusterIP) — exposes the HTTP API port.
+- **Ingress** — publishes the API; mutating endpoints protected by the bearer
+  token (TLS per cluster norms).
+
+Image: a minimal Python base (e.g. `python:3.12-slim`), `paho-mqtt` installed,
+non-root user. Build/versioning per existing cluster conventions; confirm the
+current stable Python base image at build time.
+
+`ponytail:` start at one replica; no HA/leader-election machinery until a real
+need exists. Version selection (Python base image, paho-mqtt) confirmed against
+current stable at implementation time, not assumed here.
+
+## Documentation
+
+- **Local `README.md`** — dev cycle: venv setup, run locally against a broker,
+  run the self-check, build the image, deploy to the cluster, and use the API
+  (forget/list).
+- **mixi-docs page** — operational doc in the documentation repo. Call
+  `get_conventions()` first and follow it (lint + strict-build gate). Cover what
+  the service does, the allowlist rename-to-opt-in workflow, the forget API, and
+  troubleshooting (entity stuck, stale value, dev node leaked).
+
+## Reuse / archive / delete from existing repo
 
 - **Reuse:** `Configuration` class (env + CLI), MQTT connect skeleton,
-  `templates/climate-monitor.yaml` as a field-shape reference,
-  `doc/tower-advertise.md` resource→entity table.
-- **Delete:** broken single-topic `advertise_devices` publish; the
-  `node/+/homeassistant/...` forward/rewrite path; dead Flask `/health`; gateway
-  node-list query; the 3-bit/binary packed caps protocol in
-  `doc/tower-advertise.md`.
-- **Dependencies:** `paho-mqtt` only. Drop `jinja2` and `flask` (no templates;
-  discovery is built in code from the sensor map).
+  `templates/climate-monitor.yaml` as a field-shape reference, the
+  resource→entity table from `tower-advertise.md`.
+- **Archive (do not delete):** merge the legacy `doc/` directory into `docs/` and
+  move the old design notes (`climate-module-discovery.md`, `tower-advertise.md`)
+  to **`docs/archive/`**. They record prior thinking (incl. the superseded packed
+  caps protocol) and stay for reference.
+- **Delete (dead code only):** broken single-topic `advertise_devices` publish;
+  the `node/+/homeassistant/...` forward/rewrite path; dead Flask `/health`;
+  gateway node-list query.
+- **Dependencies:** `paho-mqtt` only. Drop `jinja2` and `flask` — no templates
+  (discovery built in code from the sensor map) and the HTTP API uses stdlib
+  `http.server`.
 
 ## HA compatibility notes (verified June 2026)
 
