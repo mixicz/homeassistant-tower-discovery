@@ -100,19 +100,31 @@ already-published entity is an immediate idempotent upsert.
 `ponytail:` one timer per pending node, flushed by the periodic tick; no
 scheduler library.
 
-### Topic parsing
+### Topic parsing — telemetry only, never commands
 
-Tower telemetry topic shape after the gateway prefix is
-`node/{alias}/{resource}/{address}/{quantity}`. The alias can contain colons
-(`role:location:id`), and the address uses `bus:device` (e.g. `1:3`). Parse by:
-- strip leading `node/`,
-- the **alias** is everything up to the resource segment — match the alias
-  against the allowlist regex first (which is anchored and colon-structured), then
-  treat the remainder as `{resource}/{address}/{quantity}`.
+Split the topic on `/`. The alias is a **single** segment (it uses colons, not
+slashes: `role:location:id`), so a telemetry topic is exactly **five** segments:
 
-`ponytail:` if alias-vs-resource boundary is ever ambiguous, the allowlist regex
-(`^[^:]+:[^:]+:[0-9]+$` over the alias) disambiguates because resources are not
-colon-triples. Revisit only if a real topic breaks this.
+```
+node / {alias} / {resource} / {address} / {quantity}
+ 0       1           2            3            4
+```
+e.g. `node/climate-monitor:hall:0/thermometer/0:0/temperature`. `parts[1]` is the
+alias; `parts[2:5]` are resource / address (`bus:device`, e.g. `1:3`, or `-`/
+`mini`) / quantity.
+
+**Critical:** the broker also carries messages sent *to* devices on the same
+`node/{alias}/...` prefix — commands, which the firmware SDK structures with
+**four** segments after the alias (e.g.
+`node/led-pwm:schodiste:0/led-pwm/-/trigger/set`, six segments total, typically
+ending in `set`). These must **never** be turned into entities.
+
+Rule: process a message **only if** it splits into exactly **five** segments
+(`node` + alias + 3). Anything with four-or-more post-alias segments (commands)
+or fewer is ignored. Do not match on the trailing `set` alone — match on the
+segment count; the count is the SDK-enforced, reliable discriminator.
+
+`ponytail:` exact segment-count check, no regex gymnastics on the remainder.
 
 ### Discovery message format
 
@@ -299,30 +311,20 @@ Manifests (`deploy/` or `k8s/`):
 - **Ingress** — publishes the API; mutating endpoints protected by the bearer
   token (TLS per cluster norms).
 
-Image: a minimal Python base (e.g. `python:3.12-slim`), `paho-mqtt` installed,
-non-root user. Build/versioning per existing cluster conventions; confirm the
-current stable Python base image at build time.
+Image: a minimal Python slim base, non-root user, `paho-mqtt` installed. **Do
+not copy a version number from this spec** — at build time look up the current
+stable Python and the current `paho-mqtt`, pin those, and document the choice.
 
 `ponytail:` start at one replica; no HA/leader-election machinery until a real
-need exists. Version selection (Python base image, paho-mqtt) confirmed against
-current stable at implementation time, not assumed here.
+need exists. All version selection (Python base image, paho-mqtt) is done against
+current stable at implementation time, never assumed from this document.
 
 ## Documentation
 
 - **Local `README.md`** — dev cycle: venv setup, run locally against a broker,
   run the self-check, build the image, deploy to the cluster, and use the API
-  (forget/list). Include a **Deferred features** section capturing ideas parked
-  out of the current scope so they aren't lost:
-  - *Actuators* (lights/fans/pump): await HA-compatible actuator firmware, then
-    discover via a firmware-published actuator-layout message consumed by a thin
-    per-firmware adapter, reusing the device-grouping/naming/allowlist machinery.
-  - *Explicit state store* (e.g. NATS JetStream KV) if non-derivable state is
-    ever needed (audit/forget history) — not required while seen-state is
-    rebuilt from retained configs.
-  - *Telemetry-stream replay* as an alternative cold-start to retained-config
-    adoption, with a liveness time-window — only if retained adoption proves
-    insufficient.
-  - *`sw_version`* on device cards via an optional gateway node-list lookup.
+  (forget/list). Already contains a **Deferred features** section (parked ideas);
+  extend it as needed.
 - **mixi-docs page** — operational doc in the documentation repo. Call
   `get_conventions()` first and follow it (lint + strict-build gate). Cover what
   the service does, the allowlist rename-to-opt-in workflow, the forget API, and
@@ -330,9 +332,14 @@ current stable at implementation time, not assumed here.
 
 ## Reuse / archive / delete from existing repo
 
-- **Reuse:** `Configuration` class (env + CLI), MQTT connect skeleton,
-  `templates/climate-monitor.yaml` as a field-shape reference, the
+- **Reuse:** `Configuration` class (env + CLI), MQTT connect skeleton, the
   resource→entity table from `tower-advertise.md`.
+- **Reference, narrowly:** `templates/climate-monitor.yaml` was never tested. Use
+  it **only** to seed the sensor map's per-sensor `device_class`/`unit` choices
+  (reviewed against current HA docs — valid; `altitude→distance/m` is approximate).
+  Do **not** copy its structure (device-bundle form, opposite of our per-component
+  approach) and treat its topic addresses (`hygrometer/0:2`, `battery/mini`, …) as
+  unverified — confirm on wire.
 - **Archive (do not delete):** merge the legacy `doc/` directory into `docs/` and
   move the old design notes (`climate-module-discovery.md`, `tower-advertise.md`)
   to **`docs/archive/`**. They record prior thinking (incl. the superseded packed
@@ -371,9 +378,12 @@ current stable at implementation time, not assumed here.
 
 One `assert`-based self-check (`__main__` or `test_*.py`, stdlib only): feed a
 list of representative observed topics (stock climate, WCC multi-bus thermometers,
-led-pwm humidity, a gateway-default `role:id` alias that must be filtered out)
-through the pure `topics → discovery messages` function and assert:
+led-pwm humidity, a gateway-default `role:id` alias that must be filtered out, and
+a four-segment **command** topic like `node/led-pwm:schodiste:0/led-pwm/-/trigger/set`
+that must be ignored) through the pure `topics → discovery messages` function and
+assert:
 - correct topic, `device_class`, `unit`, `expire_after`, `unique_id`;
 - all entities of one alias share `device.identifiers` (one device);
 - non-allowlisted aliases produce nothing;
+- command topics (≠ 5 segments) produce nothing;
 - generated names match the convention.
