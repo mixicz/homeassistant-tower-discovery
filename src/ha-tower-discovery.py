@@ -4,12 +4,14 @@
 import argparse
 from collections import Counter
 import hashlib
+import http.server
 import json
 import os
 import re
 import sys
 import threading
 import time
+import urllib.parse
 
 import paho.mqtt.client as mqtt
 
@@ -281,15 +283,20 @@ class TowerDiscoveryService:
         self._adopt()
         self._reconcile()
         self._go_live()
-        # HTTP server + tick loop added in Task 6; placeholder for now
+        handler = make_handler(self)
+        httpd = http.server.HTTPServer((self.config.http_bind, self.config.http_port), handler)
+        httpd.socket.settimeout(1.0)  # so _tick() runs roughly every second
+        if self.config.debug:
+            print(f'HTTP API on {self.config.http_bind}:{self.config.http_port}')
         try:
             while True:
-                time.sleep(1)
+                httpd.handle_request()
                 self._tick()
         except KeyboardInterrupt:
             pass
         finally:
             self.client.loop_stop()
+            httpd.server_close()
 
     def _tick(self):
         now = time.monotonic()
@@ -402,6 +409,67 @@ class TowerDiscoveryService:
             )
             del self._seen_state[object_id]
             return True
+
+
+def make_handler(service: 'TowerDiscoveryService'):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            if service.config.debug:
+                super().log_message(fmt, *args)
+
+        def _send(self, code: int, body: bytes = b'', content_type: str = 'application/json'):
+            self.send_response(code)
+            if body:
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(body)))
+            else:
+                self.send_header('Content-Length', '0')
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def _auth_ok(self) -> bool:
+            token = service.config.api_token
+            if not token:
+                return True
+            return self.headers.get('Authorization', '') == f'Bearer {token}'
+
+        def do_GET(self):
+            path = urllib.parse.urlparse(self.path).path
+            if path == '/health':
+                self._send(200)
+            elif path == '/ready':
+                self._send(200 if service.mqtt_connected else 503)
+            elif path == '/devices':
+                body = json.dumps(service.get_devices(), ensure_ascii=False).encode()
+                self._send(200, body)
+            else:
+                self._send(404)
+
+        def do_DELETE(self):
+            if not self._auth_ok():
+                self._send(401)
+                return
+            path = urllib.parse.urlparse(self.path).path
+
+            # DELETE /devices/{alias}/entities/{object_id}
+            m = re.fullmatch(r'/devices/([^/]+)/entities/([^/]+)', path)
+            if m:
+                alias     = urllib.parse.unquote(m.group(1))
+                object_id = urllib.parse.unquote(m.group(2))
+                self._send(204 if service.forget_entity(alias, object_id) else 404)
+                return
+
+            # DELETE /devices/{alias}
+            m = re.fullmatch(r'/devices/([^/]+)', path)
+            if m:
+                alias = urllib.parse.unquote(m.group(1))
+                self._send(204 if service.forget_node(alias) else 404)
+                return
+
+            self._send(404)
+
+    return Handler
 
 
 def main():
