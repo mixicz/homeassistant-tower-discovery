@@ -2,6 +2,7 @@
 """Tower → Home Assistant passive sensor discovery service."""
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -303,7 +304,6 @@ class TowerDiscoveryService:
 
     def _flush_node(self, alias: str, topics: list):
         """Publish all buffered entities for a node, with correct sibling counts."""
-        from collections import Counter
         counts = Counter((t['resource'], t['quantity']) for t in topics)
         with self._lock:
             for parsed in topics:
