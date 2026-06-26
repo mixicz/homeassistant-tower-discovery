@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tower-ha-discovery
+  namespace: home-assistant
+  annotations:
+    spec.ingressClassName: traefik
+    traefik.ingress.kubernetes.io/router.tls.certresolver: active24resolver
+spec:
+  rules:
+  - host: tower-discovery.mixi.cz   # TODO: confirm this hostname with the operator
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: tower-ha-discovery
+            port:
+              number: 8080
+  tls:
+  - hosts:
+    - tower-discovery.mixi.cz

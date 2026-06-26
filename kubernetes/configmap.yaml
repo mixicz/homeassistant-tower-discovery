@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tower-ha-discovery
+  namespace: home-assistant
+data:
+  MQTT_BROKER: "mosquitto.home-assistant.svc.cluster.local"
+  MQTT_PORT: "1883"
+  NODE_PREFIX: "node"
+  DISCOVERY_PREFIX: "homeassistant"
+  HTTP_BIND: "0.0.0.0"
+  HTTP_PORT: "8080"
+  DEBOUNCE_SECONDS: "120"
+  ADOPT_QUIESCENCE: "1"
+  ADOPT_TIMEOUT: "10"
+  DEFAULT_EXPIRE_AFTER: "7200"
+  CONFIG_FILE: "/etc/tower-ha-discovery/config.json"
+  DEBUG: "false"
+  config.json: |
+    {
+      "allowlist": ["^[^:]+:[^:]+:[0-9]+$"],
+      "location_labels": {},
+      "name_overrides": {},
+      "sensor_map_overrides": {}
+    }
