@@ -2,9 +2,20 @@
 """Tower → Home Assistant passive sensor discovery service."""
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
+import threading
+import time
+
+import paho.mqtt.client as mqtt
+
+from discovery import (
+    parse_topic, sanitize_object_id, build_object_id,
+    sensor_meta, build_device_name, build_entity_name, build_discovery_payload,
+)
 
 
 class Configuration:
@@ -95,10 +106,161 @@ class Configuration:
             }
 
 
+class TowerDiscoveryService:
+    def __init__(self, config: Configuration):
+        self.config = config
+        self._lock = threading.Lock()
+        self._seen_state: dict = {}           # object_id -> {hash, alias, resource, quantity, address}
+        self._debounce_buffer: dict = {}      # alias -> {started_at, topics: [parsed_topic, ...]}
+        self.mqtt_connected = False
+        self._adopting = False
+        self._adopt_last_msg = 0.0
+        self._adopt_start = 0.0
+
+        self.client = mqtt.Client()
+        self.client.on_connect    = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message    = self._on_message
+        if config.mqtt_user:
+            self.client.username_pw_set(config.mqtt_user, config.mqtt_password)
+
+    # ------------------------------------------------------------------ allowlist
+
+    def _allowlist_match(self, alias: str) -> bool:
+        return any(re.match(pat, alias) for pat in self.config.allowlist)
+
+    # ------------------------------------------------------------------ MQTT callbacks
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self.mqtt_connected = True
+            if self.config.debug:
+                print('MQTT connected')
+        else:
+            print(f'MQTT connect failed: rc={rc}', file=sys.stderr)
+
+    def _on_disconnect(self, client, userdata, rc):
+        self.mqtt_connected = False
+        if self.config.debug:
+            print(f'MQTT disconnected: rc={rc}')
+
+    def _on_message(self, client, userdata, msg):
+        if self._adopting:
+            self._handle_adopt_message(msg)
+            return
+        self._handle_live_message(msg)
+
+    def _handle_adopt_message(self, msg):
+        self._adopt_last_msg = time.monotonic()
+        if not msg.payload:
+            return  # empty = already cleared, skip
+        try:
+            payload = json.loads(msg.payload)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get('origin', {}).get('name') != 'tower-ha-discovery':
+            return
+        # Extract object_id from topic: homeassistant/sensor/{object_id}/config
+        parts = msg.topic.split('/')
+        if len(parts) != 4:
+            return
+        object_id = parts[2]
+        payload_hash = hashlib.md5(msg.payload).hexdigest()
+        # Reconstruct resource/quantity/address from state_topic
+        state_topic = payload.get('state_topic', '')
+        parsed = parse_topic(state_topic)
+        alias = payload.get('device', {}).get('identifiers', [''])[0]
+        with self._lock:
+            self._seen_state[object_id] = {
+                'hash': payload_hash,
+                'alias': alias,
+                'resource': parsed['resource'] if parsed else '',
+                'quantity': parsed['quantity'] if parsed else '',
+                'address':  parsed['address']  if parsed else '',
+            }
+
+    def _handle_live_message(self, msg):
+        pass  # implemented in Task 5
+
+    # ------------------------------------------------------------------ startup phases
+
+    def _wait_for_connect(self, timeout: float = 30.0):
+        start = time.monotonic()
+        while not self.mqtt_connected:
+            if time.monotonic() - start > timeout:
+                raise RuntimeError('MQTT connect timeout')
+            time.sleep(0.1)
+
+    def _adopt(self):
+        disc_topic = f'{self.config.discovery_prefix}/sensor/+/config'
+        self._adopting = True
+        self._adopt_last_msg = time.monotonic()
+        self._adopt_start = time.monotonic()
+        self.client.subscribe(disc_topic)
+
+        while True:
+            idle    = time.monotonic() - self._adopt_last_msg
+            elapsed = time.monotonic() - self._adopt_start
+            if idle >= self.config.adopt_quiescence or elapsed >= self.config.adopt_timeout:
+                break
+            time.sleep(0.05)
+
+        self._adopting = False
+        self.client.unsubscribe(disc_topic)
+        if self.config.debug:
+            print(f'Adoption complete: {len(self._seen_state)} entities in seen-state')
+
+    def _reconcile(self):
+        with self._lock:
+            to_clear = [
+                oid for oid, entry in self._seen_state.items()
+                if not self._allowlist_match(entry['alias'])
+            ]
+        for oid in to_clear:
+            self.client.publish(
+                f'{self.config.discovery_prefix}/sensor/{oid}/config',
+                b'', retain=True,
+            )
+            with self._lock:
+                self._seen_state.pop(oid, None)
+        if self.config.debug and to_clear:
+            print(f'Reconciled {len(to_clear)} entities no longer on allowlist')
+
+    def _go_live(self):
+        self.client.subscribe(f'{self.config.node_prefix}/+/#')
+        if self.config.debug:
+            print('Live observation started')
+
+    # ------------------------------------------------------------------ main entry
+
+    def run(self):
+        self.client.connect(self.config.mqtt_broker, self.config.mqtt_port, keepalive=60)
+        self.client.loop_start()
+        self._wait_for_connect()
+        self._adopt()
+        self._reconcile()
+        self._go_live()
+        # HTTP server + tick loop added in Task 6; placeholder for now
+        try:
+            while True:
+                time.sleep(1)
+                self._tick()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.client.loop_stop()
+
+    def _tick(self):
+        pass  # implemented in Task 5
+
+
 def main():
     cfg = Configuration()
     cfg.load()
-    print(f'Config loaded: broker={cfg.mqtt_broker}:{cfg.mqtt_port}, debug={cfg.debug}')
+    service = TowerDiscoveryService(cfg)
+    service.run()
 
 
 if __name__ == '__main__':
