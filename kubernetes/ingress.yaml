@@ -4,9 +4,9 @@ metadata:
   name: tower-ha-discovery
   namespace: home-assistant
   annotations:
-    spec.ingressClassName: traefik
     traefik.ingress.kubernetes.io/router.tls.certresolver: active24resolver
 spec:
+  ingressClassName: traefik
   rules:
   - host: tower-discovery.mixi.cz   # TODO: confirm this hostname with the operator
     http:
