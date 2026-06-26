@@ -182,7 +182,45 @@ class TowerDiscoveryService:
             }
 
     def _handle_live_message(self, msg):
-        pass  # implemented in Task 5
+        parsed = parse_topic(msg.topic)
+        if parsed is None:
+            return
+        alias = parsed['alias']
+        if not self._allowlist_match(alias):
+            if self.config.debug:
+                print(f'Ignored (not allowlisted): {alias}')
+            return
+        meta = sensor_meta(parsed['resource'], parsed['quantity'],
+                            self.config.sensor_map_overrides)
+        if meta is None:
+            if self.config.debug:
+                print(f'Ignored (unknown sensor): {parsed["resource"]}/{parsed["quantity"]}')
+            return
+
+        with self._lock:
+            is_new_node = (alias not in self._seen_state_aliases() and
+                           alias not in self._debounce_buffer)
+            if is_new_node:
+                # Start debounce buffer for this alias
+                self._debounce_buffer[alias] = {
+                    'started_at': time.monotonic(),
+                    'topics': [],
+                }
+
+            if alias in self._debounce_buffer:
+                # Deduplicate by (resource, address, quantity)
+                key = (parsed['resource'], parsed['address'], parsed['quantity'])
+                existing_keys = {(t['resource'], t['address'], t['quantity'])
+                                 for t in self._debounce_buffer[alias]['topics']}
+                if key not in existing_keys:
+                    self._debounce_buffer[alias]['topics'].append(parsed)
+            else:
+                # Node already established — publish immediately
+                self._publish_immediately_locked(parsed, meta)
+
+    def _seen_state_aliases(self) -> set:
+        """Return set of aliases in seen_state. Must be called with lock held."""
+        return {e['alias'] for e in self._seen_state.values()}
 
     # ------------------------------------------------------------------ startup phases
 
@@ -253,7 +291,117 @@ class TowerDiscoveryService:
             self.client.loop_stop()
 
     def _tick(self):
-        pass  # implemented in Task 5
+        now = time.monotonic()
+        to_flush = []
+        with self._lock:
+            for alias, buf in list(self._debounce_buffer.items()):
+                if now - buf['started_at'] >= self.config.debounce_seconds:
+                    to_flush.append((alias, buf['topics']))
+                    del self._debounce_buffer[alias]
+        for alias, topics in to_flush:
+            self._flush_node(alias, topics)
+
+    def _flush_node(self, alias: str, topics: list):
+        """Publish all buffered entities for a node, with correct sibling counts."""
+        from collections import Counter
+        counts = Counter((t['resource'], t['quantity']) for t in topics)
+        with self._lock:
+            for parsed in topics:
+                meta = sensor_meta(parsed['resource'], parsed['quantity'],
+                                    self.config.sensor_map_overrides)
+                if meta is None:
+                    continue
+                sibling_count = counts[(parsed['resource'], parsed['quantity'])]
+                device_name = build_device_name(parsed['alias'],
+                                                self.config.location_labels,
+                                                self.config.name_overrides)
+                entity_name = build_entity_name(parsed['resource'], parsed['quantity'],
+                                                parsed['address'], sibling_count,
+                                                self.config.name_overrides)
+                object_id, disc_topic, payload = build_discovery_payload(
+                    parsed, meta, device_name, entity_name)
+                self._publish_entity_locked(object_id, disc_topic, payload, parsed)
+
+    def _publish_immediately_locked(self, parsed: dict, meta: dict):
+        """Publish a single entity for an already-established node. Lock must be held."""
+        sibling_count = sum(
+            1 for e in self._seen_state.values()
+            if e['alias'] == parsed['alias']
+            and e['resource'] == parsed['resource']
+            and e['quantity'] == parsed['quantity']
+        ) + 1
+
+        device_name = build_device_name(parsed['alias'],
+                                        self.config.location_labels,
+                                        self.config.name_overrides)
+        entity_name = build_entity_name(parsed['resource'], parsed['quantity'],
+                                        parsed['address'], sibling_count,
+                                        self.config.name_overrides)
+        object_id, disc_topic, payload = build_discovery_payload(
+            parsed, meta, device_name, entity_name)
+        self._publish_entity_locked(object_id, disc_topic, payload, parsed)
+
+    def _publish_entity_locked(self, object_id: str, disc_topic: str,
+                                payload: dict, parsed: dict):
+        """Publish a discovery config if content changed. Lock must be held."""
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        new_hash = hashlib.md5(body).hexdigest()
+        existing = self._seen_state.get(object_id)
+        if existing and existing['hash'] == new_hash:
+            return  # unchanged — skip
+        self.client.publish(disc_topic, body, retain=True)
+        self._seen_state[object_id] = {
+            'hash': new_hash,
+            'alias': parsed['alias'],
+            'resource': parsed['resource'],
+            'quantity': parsed['quantity'],
+            'address': parsed['address'],
+        }
+        if self.config.debug:
+            print(f'Published: {disc_topic}')
+
+    def get_devices(self) -> dict:
+        with self._lock:
+            by_alias: dict = {}
+            for oid, entry in self._seen_state.items():
+                alias = entry['alias']
+                by_alias.setdefault(alias, []).append({
+                    'object_id': oid,
+                    'state_topic': (
+                        f'{self.config.node_prefix}/{alias}/'
+                        f'{entry["resource"]}/{entry["address"]}/{entry["quantity"]}'
+                    ),
+                })
+            return {'devices': [
+                {'alias': alias, 'entities': entities}
+                for alias, entities in sorted(by_alias.items())
+            ]}
+
+    def forget_node(self, alias: str) -> bool:
+        with self._lock:
+            to_delete = [oid for oid, e in self._seen_state.items() if e['alias'] == alias]
+            if not to_delete:
+                return False
+            for oid in to_delete:
+                self.client.publish(
+                    f'{self.config.discovery_prefix}/sensor/{oid}/config',
+                    b'', retain=True,
+                )
+                del self._seen_state[oid]
+            self._debounce_buffer.pop(alias, None)
+            return True
+
+    def forget_entity(self, alias: str, object_id: str) -> bool:
+        with self._lock:
+            entry = self._seen_state.get(object_id)
+            if not entry or entry['alias'] != alias:
+                return False
+            self.client.publish(
+                f'{self.config.discovery_prefix}/sensor/{object_id}/config',
+                b'', retain=True,
+            )
+            del self._seen_state[object_id]
+            return True
 
 
 def main():
