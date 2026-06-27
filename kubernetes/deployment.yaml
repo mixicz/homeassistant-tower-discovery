@@ -29,6 +29,13 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /etc/tower-ha-discovery
+        resources:
+          requests:
+            memory: "20Mi"
+            cpu: "0"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
         ports:
         - containerPort: 8080
           name: http
