@@ -11,7 +11,7 @@ shared `device.identifiers`.
 
 ## Status
 
-Design approved; implementation pending. Authoritative design:
+Implementation complete. Authoritative design:
 [`docs/superpowers/specs/2026-06-25-tower-ha-discovery-design.md`](docs/superpowers/specs/2026-06-25-tower-ha-discovery-design.md).
 Earlier exploratory notes are archived under [`docs/archive/`](docs/archive/).
 

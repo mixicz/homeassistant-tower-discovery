@@ -154,9 +154,9 @@ class TowerDiscoveryService:
         self._handle_live_message(msg)
 
     def _handle_adopt_message(self, msg):
-        self._adopt_last_msg = time.monotonic()
         if not msg.payload:
             return  # empty = already cleared, skip
+        self._adopt_last_msg = time.monotonic()
         try:
             payload = json.loads(msg.payload)
         except Exception:
