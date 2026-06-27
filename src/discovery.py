@@ -3,14 +3,30 @@ import re
 # Sensor map: (resource, quantity) -> {device_class, unit, expire_after}
 # device_class=None means no device_class key is emitted.
 SENSOR_MAP = {
-    ('thermometer', 'temperature'):      {'device_class': 'temperature',                     'unit': '°C',  'expire_after': 1500},
-    ('hygrometer', 'relative-humidity'): {'device_class': 'humidity',                        'unit': '%',   'expire_after': 1500},
-    ('lux-meter', 'illuminance'):        {'device_class': 'illuminance',                     'unit': 'lx',  'expire_after': 1500},
-    ('barometer', 'pressure'):           {'device_class': 'atmospheric_pressure',            'unit': 'hPa', 'expire_after': 1500},
-    ('barometer', 'altitude'):           {'device_class': 'distance',                        'unit': 'm',   'expire_after': 7200},
-    ('voc-sensor', 'tvoc'):              {'device_class': 'volatile_organic_compounds_parts', 'unit': 'ppb', 'expire_after': 1500},
-    ('voc-lp-sensor', 'tvoc'):           {'device_class': 'volatile_organic_compounds_parts', 'unit': 'ppb', 'expire_after': 1500},
-    ('battery', 'voltage'):              {'device_class': 'voltage',                         'unit': 'V',   'expire_after': 7200},
+    ('thermometer', 'temperature'):      {'device_class': 'temperature',                      'unit': '°C',   'expire_after': 1500},
+    ('hygrometer', 'relative-humidity'): {'device_class': 'humidity',                         'unit': '%',    'expire_after': 1500},
+    ('lux-meter', 'illuminance'):        {'device_class': 'illuminance',                      'unit': 'lx',   'expire_after': 1500},
+    ('barometer', 'pressure'):           {'device_class': 'atmospheric_pressure',             'unit': 'hPa',  'expire_after': 1500},
+    ('barometer', 'altitude'):           {'device_class': 'distance',                         'unit': 'm',    'expire_after': 7200},
+    ('voc-sensor', 'tvoc'):              {'device_class': 'volatile_organic_compounds_parts', 'unit': 'ppb',  'expire_after': 1500},
+    ('voc-lp-sensor', 'tvoc'):           {'device_class': 'volatile_organic_compounds_parts', 'unit': 'ppb',  'expire_after': 1500},
+    ('battery', 'voltage'):              {'device_class': 'voltage',                          'unit': 'V',    'expire_after': 7200},
+    ('co2-meter', 'concentration'):      {'device_class': 'carbon_dioxide',                   'unit': 'ppm',  'expire_after': 1500},
+    # expire_after=None → omit from payload (no expiry)
+    ('pir', 'event-count'):              {'device_class': None, 'unit': None, 'expire_after': None},
+    ('push-button', 'event-count'):      {'device_class': None, 'unit': None, 'expire_after': None},
+    ('push-button', 'hold-count'):       {'device_class': None, 'unit': None, 'expire_after': None},
+    ('push-button', 'hold-duration'):    {'device_class': None, 'unit': None, 'expire_after': None},
+    ('soil-sensor', 'temperature'):      {'device_class': 'temperature',                      'unit': '°C',   'expire_after': 7200},
+    ('soil-sensor', 'raw'):              {'device_class': None, 'unit': None,                                 'expire_after': 7200},
+    ('wind', 'speed'):                   {'device_class': 'wind_speed',                       'unit': 'm/s',  'expire_after': 600},
+    ('wind', 'gust'):                    {'device_class': 'wind_speed',                       'unit': 'm/s',  'expire_after': 600},
+    ('wind', 'angle'):                   {'device_class': 'wind_direction_angle',             'unit': '°',    'expire_after': 600},
+    ('rainfall', 'mm'):                  {'device_class': 'precipitation',                    'unit': 'mm',   'expire_after': 3600},
+    ('accelerometer', 'accel-x'):        {'device_class': None,                               'unit': 'm/s²', 'expire_after': 1500},
+    ('accelerometer', 'accel-y'):        {'device_class': None,                               'unit': 'm/s²', 'expire_after': 1500},
+    ('accelerometer', 'accel-z'):        {'device_class': None,                               'unit': 'm/s²', 'expire_after': 1500},
+    ('encoder', 'angle'):                {'device_class': None,                               'unit': '°',    'expire_after': 7200},
 }
 
 _RPM_META = {'device_class': None, 'unit': 'rpm', 'expire_after': 600}
@@ -26,6 +42,18 @@ QUANTITY_LABELS = {
     'tvoc': 'TVOC',
     'voltage': 'Battery Voltage',
     'rpm': 'Fan Speed',
+    'concentration': 'CO₂',
+    'event-count': 'Events',
+    'hold-count': 'Hold Events',
+    'hold-duration': 'Hold Duration',
+    'raw': 'Raw',
+    'speed': 'Wind Speed',
+    'gust': 'Wind Gust',
+    'angle': 'Angle',
+    'mm': 'Rainfall',
+    'accel-x': 'Acceleration X',
+    'accel-y': 'Acceleration Y',
+    'accel-z': 'Acceleration Z',
 }
 
 
@@ -103,7 +131,6 @@ def build_discovery_payload(
         'name': entity_name,
         'unique_id': object_id,
         'state_topic': state_topic,
-        'expire_after': meta['expire_after'],
         'device': {
             'identifiers': [alias],
             'name': device_name,
@@ -116,5 +143,7 @@ def build_discovery_payload(
         payload['device_class'] = meta['device_class']
     if meta.get('unit'):
         payload['unit_of_measurement'] = meta['unit']
+    if meta.get('expire_after') is not None:
+        payload['expire_after'] = meta['expire_after']
 
     return object_id, discovery_topic, payload

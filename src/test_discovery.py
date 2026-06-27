@@ -219,6 +219,37 @@ def test_pipeline_no_deprecated_object_id_field():
     assert 'object_id' not in payload  # HA 2026.4 removed this field
 
 
+def test_sensor_meta_co2():
+    m = sensor_meta('co2-meter', 'concentration')
+    assert m is not None
+    assert m['device_class'] == 'carbon_dioxide'
+    assert m['unit'] == 'ppm'
+    assert m['expire_after'] == 1500
+
+
+def test_sensor_meta_pir_no_expiry():
+    m = sensor_meta('pir', 'event-count')
+    assert m is not None
+    assert m['expire_after'] is None
+
+
+def test_pipeline_pir_no_expire_after():
+    r = _pipeline('node/motion:hall:0/pir/-/event-count')
+    assert r is not None
+    _, _, payload = r
+    assert 'expire_after' not in payload
+    assert 'device_class' not in payload
+
+
+def test_pipeline_co2():
+    r = _pipeline('node/air-quality:kitchen:0/co2-meter/-/concentration')
+    assert r is not None
+    _, _, payload = r
+    assert payload['device_class'] == 'carbon_dioxide'
+    assert payload['unit_of_measurement'] == 'ppm'
+    assert payload['expire_after'] == 1500
+
+
 TESTS = [
     test_parse_topic_valid, test_parse_topic_command_ignored,
     test_parse_topic_too_few_segments, test_parse_topic_wrong_prefix,
@@ -235,6 +266,8 @@ TESTS = [
     test_pipeline_multi_bus_share_device, test_pipeline_rpm,
     test_pipeline_state_topic, test_pipeline_origin,
     test_pipeline_no_deprecated_object_id_field,
+    test_sensor_meta_co2, test_sensor_meta_pir_no_expiry,
+    test_pipeline_pir_no_expire_after, test_pipeline_co2,
 ]
 
 if __name__ == '__main__':
