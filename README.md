@@ -36,17 +36,100 @@ Earlier exploratory notes are archived under [`docs/archive/`](docs/archive/).
 
 ## Development
 
-> _To be completed during implementation._ Will cover: venv setup, running
-> locally against a broker, running the `assert`-based self-check, building the
-> container image (look up and pin **current stable** Python + `paho-mqtt` at
-> build time), and deploying to the `home-assistant` namespace.
+### Setup
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+### Run self-check (no broker needed)
+
+```bash
+.venv/bin/python src/test_discovery.py
+```
+
+Expected: `All N tests passed.`
+
+### Run locally against a broker
+
+```bash
+MQTT_BROKER=<your-broker> DEBUG=true .venv/bin/python src/ha-tower-discovery.py
+```
+
+The service connects, adopts existing retained configs (~1 s quiescence), then
+listens on `node/+/#`. Allowlisted nodes with known sensor types appear in HA
+after the debounce window (default 120 s). Use `--debounce 5` for faster
+local testing.
+
+### Build and push the image
+
+Build and push (never use `latest` — tag with git SHA):
+
+```bash
+TAG=$(git rev-parse --short HEAD)
+docker build -t mifs01.intranet:5001/home/tower-ha-discovery:${TAG} .
+docker push mifs01.intranet:5001/home/tower-ha-discovery:${TAG}
+# Then update the image tag in kubernetes/deployment.yaml and kubectl apply
+```
+
+### Provision the secret (once)
+
+```bash
+./scripts/create-secret.sh
+```
+
+Store the printed `API_TOKEN` in Bitwarden.
+
+### Deploy to the cluster
+
+```bash
+kubectl apply -f kubernetes/
+```
+
+Verify:
+
+```bash
+kubectl -n home-assistant rollout status deploy/tower-ha-discovery
+kubectl -n home-assistant logs -f deploy/tower-ha-discovery
+```
 
 ## HTTP API
 
-> _To be completed during implementation._ `GET /health`, `GET /ready`,
-> `GET /devices`, `DELETE /devices/{alias}`,
-> `DELETE /devices/{alias}/entities/{object_id}` (mutating endpoints require a
-> bearer token).
+The service exposes a small HTTP API for operations and Kubernetes probes.
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/health` | none | Liveness: 200 if process is serving |
+| `GET` | `/ready` | none | Readiness: 200 if MQTT connected, 503 otherwise |
+| `GET` | `/devices` | none | List discovered nodes and their entities (JSON) |
+| `DELETE` | `/devices/{alias}` | Bearer | Remove a node: clear retained configs, drop from state |
+| `DELETE` | `/devices/{alias}/entities/{object_id}` | Bearer | Remove a single entity |
+
+Responses: `/health` and `/ready` return an empty body with the status code.
+`/devices` returns `{"devices": [{"alias": "...", "entities": [{...}]}]}`.
+Mutating endpoints return 204 on success, 401 on missing/wrong token, 404 on unknown alias/entity.
+
+Mutating endpoints require `Authorization: Bearer <API_TOKEN>`.
+
+### Examples
+
+```bash
+# List all discovered nodes
+curl http://tower-discovery.mixi.cz/devices
+
+# Remove a node (e.g. decommissioned)
+curl -X DELETE \
+  -H "Authorization: Bearer $API_TOKEN" \
+  http://tower-discovery.mixi.cz/devices/climate-monitor%3Ahall%3A0
+
+# Remove a single entity
+curl -X DELETE \
+  -H "Authorization: Bearer $API_TOKEN" \
+  "http://tower-discovery.mixi.cz/devices/climate-monitor%3Ahall%3A0/entities/climate-monitor_hall_0__barometer_0_0_altitude"
+```
+
+URL-encode colons in alias (`:`→`%3A`).
 
 ## Deferred features
 
