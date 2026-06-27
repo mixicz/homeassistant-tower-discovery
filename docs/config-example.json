@@ -1,0 +1,11 @@
+{
+    "allowlist": [
+        "^[^:]+:[^:]+:[0-9]+$",
+        "^climate-monitor:0$"
+    ],
+    "location_labels": {},
+    "name_overrides": {
+        "climate-monitor:0": "Climate Monitor"
+    },
+    "sensor_map_overrides": {}
+}
