@@ -192,16 +192,18 @@ class TowerDiscoveryService:
         parsed = parse_topic(msg.topic)
         if parsed is None:
             return
+        if self.config.debug:
+            print(f'RX {msg.topic} = {msg.payload.decode(errors="replace")}')
         alias = parsed['alias']
         if not self._allowlist_match(alias):
             if self.config.debug:
-                print(f'Ignored (not allowlisted): {alias}')
+                print(f'  -> ignored (not allowlisted): {alias}')
             return
         meta = sensor_meta(parsed['resource'], parsed['quantity'],
                             self.config.sensor_map_overrides)
         if meta is None:
             if self.config.debug:
-                print(f'Ignored (unknown sensor): {parsed["resource"]}/{parsed["quantity"]}')
+                print(f'  -> ignored (unknown sensor): {parsed["resource"]}/{parsed["quantity"]}')
             return
 
         with self._lock:
@@ -372,9 +374,10 @@ class TowerDiscoveryService:
             'quantity': parsed['quantity'],
             'address': parsed['address'],
         }
-        if self.config.debug:
+        if self.config.dry_run or self.config.debug:
             prefix = '[DRY RUN] ' if self.config.dry_run else ''
-            print(f'{prefix}Published: {disc_topic}')
+            payload_str = json.dumps(payload, ensure_ascii=False, indent=2) if self.config.debug else ''
+            print(f'{prefix}Publish: {disc_topic}' + (f'\n{payload_str}' if payload_str else ''))
 
     def get_devices(self) -> dict:
         with self._lock:
