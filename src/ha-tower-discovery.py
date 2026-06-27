@@ -46,6 +46,7 @@ class Configuration:
         self.name_overrides: dict = {}
         self.sensor_map_overrides: dict = {}
         self.debug = False
+        self.dry_run = False
         self.config_file = ''
 
     def load(self):
@@ -71,6 +72,7 @@ class Configuration:
         self.default_expire_after = int(e('DEFAULT_EXPIRE_AFTER', self.default_expire_after))
         self.config_file = e('CONFIG_FILE', self.config_file)
         self.debug = e('DEBUG', '').lower() in ('1', 'true', 'yes')
+        self.dry_run = e('DRY_RUN', '').lower() in ('1', 'true', 'yes')
 
     def _from_args(self):
         p = argparse.ArgumentParser(description='Tower → HA discovery service')
@@ -82,6 +84,7 @@ class Configuration:
         p.add_argument('--debounce', type=float)
         p.add_argument('--config-file')
         p.add_argument('--debug', action='store_true')
+        p.add_argument('--dry-run', action='store_true')
         args = p.parse_args()
         if args.broker:       self.mqtt_broker = args.broker
         if args.port:         self.mqtt_port = args.port
@@ -91,6 +94,7 @@ class Configuration:
         if args.debounce:     self.debounce_seconds = args.debounce
         if args.config_file:  self.config_file = args.config_file
         if args.debug:        self.debug = True
+        if args.dry_run:      self.dry_run = True
 
     def _from_file(self, path: str):
         with open(path) as f:
@@ -260,10 +264,11 @@ class TowerDiscoveryService:
                 if not self._allowlist_match(entry['alias'])
             ]
         for oid in to_clear:
-            self.client.publish(
-                f'{self.config.discovery_prefix}/sensor/{oid}/config',
-                b'', retain=True,
-            )
+            if not self.config.dry_run:
+                self.client.publish(
+                    f'{self.config.discovery_prefix}/sensor/{oid}/config',
+                    b'', retain=True,
+                )
             with self._lock:
                 self._seen_state.pop(oid, None)
         if self.config.debug and to_clear:
@@ -286,6 +291,8 @@ class TowerDiscoveryService:
         handler = make_handler(self)
         httpd = http.server.HTTPServer((self.config.http_bind, self.config.http_port), handler)
         httpd.socket.settimeout(1.0)  # so _tick() runs roughly every second
+        if self.config.dry_run:
+            print('DRY RUN — no MQTT publishes will be sent')
         if self.config.debug:
             print(f'HTTP API on {self.config.http_bind}:{self.config.http_port}')
         try:
@@ -356,7 +363,8 @@ class TowerDiscoveryService:
         existing = self._seen_state.get(object_id)
         if existing and existing['hash'] == new_hash:
             return  # unchanged — skip
-        self.client.publish(disc_topic, body, retain=True)
+        if not self.config.dry_run:
+            self.client.publish(disc_topic, body, retain=True)
         self._seen_state[object_id] = {
             'hash': new_hash,
             'alias': parsed['alias'],
@@ -365,7 +373,8 @@ class TowerDiscoveryService:
             'address': parsed['address'],
         }
         if self.config.debug:
-            print(f'Published: {disc_topic}')
+            prefix = '[DRY RUN] ' if self.config.dry_run else ''
+            print(f'{prefix}Published: {disc_topic}')
 
     def get_devices(self) -> dict:
         with self._lock:
@@ -390,10 +399,11 @@ class TowerDiscoveryService:
             if not to_delete:
                 return False
             for oid in to_delete:
-                self.client.publish(
-                    f'{self.config.discovery_prefix}/sensor/{oid}/config',
-                    b'', retain=True,
-                )
+                if not self.config.dry_run:
+                    self.client.publish(
+                        f'{self.config.discovery_prefix}/sensor/{oid}/config',
+                        b'', retain=True,
+                    )
                 del self._seen_state[oid]
             self._debounce_buffer.pop(alias, None)
             return True
@@ -403,10 +413,11 @@ class TowerDiscoveryService:
             entry = self._seen_state.get(object_id)
             if not entry or entry['alias'] != alias:
                 return False
-            self.client.publish(
-                f'{self.config.discovery_prefix}/sensor/{object_id}/config',
-                b'', retain=True,
-            )
+            if not self.config.dry_run:
+                self.client.publish(
+                    f'{self.config.discovery_prefix}/sensor/{object_id}/config',
+                    b'', retain=True,
+                )
             del self._seen_state[object_id]
             return True
 
