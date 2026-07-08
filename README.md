@@ -62,10 +62,16 @@ listens on `node/+/#`. Allowlisted nodes with known sensor types appear in HA
 after the debounce window (default 120 s). Use `--debounce 5` for faster
 local testing.
 
-### Dry-run mode (observe without publishing)
+#### Dry-run mode (observe without publishing)
 
 ```bash
 MQTT_BROKER=<your-broker> DRY_RUN=true DEBUG=true .venv/bin/python src/ha-tower-discovery.py
+```
+
+or full blown:
+
+```bash
+DRY_RUN=true DEBUG=true CONFIG_FILE=docs/config-example.json DEBOUNCE_SECONDS=1 API_TOKEN=test MQTT_BROKER=mqtt.mixi.cz .venv/bin/python src/ha-tower-discovery.py
 ```
 
 With `DRY_RUN=true` the service connects and subscribes normally but sends nothing to the broker.
